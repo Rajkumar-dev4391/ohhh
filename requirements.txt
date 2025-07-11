@@ -1,0 +1,38 @@
+# Core FastAPI and async dependencies
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
+flower
+# Authentication and OAuth
+PyJWT
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+googleapis-common-protos
+google-api-python-client
+requests-oauthlib
+
+# Database and ORM
+sqlalchemy
+asyncpg
+psycopg2-binary
+alembic
+
+# Celery and Redis
+celery[redis]
+redis
+
+# Utilities
+python-dotenv
+rich
+tiktoken
+
+# MCP and Agent dependencies (preserve existing functionality)
+agno
+mcp
+
+# Document processing (for mcp_toolkit)
+PyPDF2
+python-docx
+reportlab

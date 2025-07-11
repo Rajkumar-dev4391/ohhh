@@ -14,7 +14,18 @@ from .database import get_sync_db, SyncSessionLocal
 from .models import JobRecord
 import tiktoken
 from dotenv import load_dotenv
+
+# Import agno and MCP components
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+from agno.tools.mcp import MCPTools
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from rich.console import Console
+
 load_dotenv()
+console = Console()
+
 # Initialize tokenizer for token counting
 try:
     tokenizer = tiktoken.encoding_for_model("gpt-4")
@@ -27,10 +38,97 @@ def count_tokens(text: str) -> int:
         return 0
     return len(tokenizer.encode(str(text)))
 
+async def create_agent(session, user_id: str):
+    """Create an agent with MCP tools."""
+    mcp_tools = MCPTools(session=session)
+    await mcp_tools.initialize()
+    
+    return Agent(
+        model=OpenAIChat(id="gpt-4o"),
+        tools=[mcp_tools],
+        markdown=True,
+        show_tool_calls=True,
+    )
+
+async def run_agent_chat(message: str, user_id: str, env_vars: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the agent chat and return response."""
+    
+    session_tokens = {
+        "input_tokens": count_tokens(message),
+        "output_tokens": 0,
+        "total_tokens": 0
+    }
+    
+    # Initialize variables for cleanup
+    process = None
+    stderr_task = None
+    
+    try:
+        # Create subprocess for MCP toolkit
+        process = await asyncio.create_subprocess_exec(
+            "python", "backend/mcp_toolkit.py",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **env_vars}
+        )
+        
+        if process.returncode is not None:
+            raise RuntimeError("MCP process failed to start")
+            
+        async def read_stderr():
+            while True:
+                line = await process.stderr.readline()
+                if not line:
+                    break
+                console.print(f"[yellow]MCP stderr:[/yellow] {line.decode().strip()}")
+                
+        stderr_task = asyncio.create_task(read_stderr())
+        
+        # Use stdio_client to communicate with MCP toolkit
+        async with stdio_client(StdioServerParameters(
+            command="python",
+            args=["backend/mcp_toolkit.py"],
+            env=env_vars
+        )) as (read, write):
+            async with ClientSession(read, write) as session:
+                agent = await create_agent(session, user_id)
+
+                response = await agent.arun(message=message, markdown=True)
+                response_content = str(response.content) if hasattr(response, 'content') else str(response)
+                
+                # Count tokens
+                session_tokens["output_tokens"] = count_tokens(response_content)
+                session_tokens["total_tokens"] = session_tokens["input_tokens"] + session_tokens["output_tokens"]
+                
+                return {
+                    "response": response_content,
+                    "token_usage": session_tokens,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+    except Exception as e:
+        console.print(f"[red]Error in agent chat: {e}[/red]")
+        raise Exception(f"Agent error: {str(e)}")
+        
+    finally:
+        # Clean up stderr task
+        if stderr_task:
+            stderr_task.cancel()
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Clean up process
+        if process and process.returncode is None:
+            process.terminate()
+            await process.wait()
+
 @celery_app.task(bind=True)
 def run_mcp_toolkit(self, job_id: str, user_id: str, message: str, env_vars: Dict[str, Any]):
     """
-    Celery task to run mcp_toolkit.py with user's environment variables
+    Celery task to run agno agent with MCP toolkit
     
     Args:
         job_id: Database job record ID
@@ -50,62 +148,31 @@ def run_mcp_toolkit(self, job_id: str, user_id: str, message: str, env_vars: Dic
         job.updated_at = datetime.utcnow()
         db.commit()
         
-        # Count input tokens
-        input_tokens = count_tokens(message)
-        
-        # Prepare environment for subprocess
-        process_env = os.environ.copy()
-        process_env.update(env_vars)
+        # Run the agent chat in async context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         
         try:
-            # Run mcp_toolkit.py as subprocess
-            result = subprocess.run(
-                ["python", "backend/mcp_toolkit.py"],
-                input=message,
-                capture_output=True,
-                text=True,
-                env=process_env,
-                timeout=1500,  # 25 minutes timeout
-                cwd=os.getcwd()
+            result = loop.run_until_complete(
+                run_agent_chat(message, user_id, env_vars)
             )
-            
-            if result.returncode != 0:
-                error_msg = f"MCP toolkit failed with return code {result.returncode}\nSTDERR: {result.stderr}\nSTDOUT: {result.stdout}"
-                raise Exception(error_msg)
-            
-            response_content = result.stdout.strip()
-            
-            if not response_content:
-                response_content = "No output received from MCP toolkit"
-            
-            # Count output tokens
-            output_tokens = count_tokens(response_content)
-            total_tokens = input_tokens + output_tokens
-            
-            token_usage = {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "total_tokens": total_tokens
-            }
             
             # Update job with success
             job.status = "completed"
-            job.result = response_content
-            job.token_usage = token_usage
+            job.result = result["response"]
+            job.token_usage = result["token_usage"]
             job.completed_at = datetime.utcnow()
             job.updated_at = datetime.utcnow()
             db.commit()
             
             return {
                 "status": "completed",
-                "result": response_content,
-                "token_usage": token_usage
+                "result": result["response"],
+                "token_usage": result["token_usage"]
             }
             
-        except subprocess.TimeoutExpired:
-            raise Exception("MCP toolkit execution timed out after 25 minutes")
-        except subprocess.CalledProcessError as e:
-            raise Exception(f"MCP toolkit process failed: {e}")
+        finally:
+            loop.close()
                 
     except Exception as e:
         # Update job with failure

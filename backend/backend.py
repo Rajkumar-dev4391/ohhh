@@ -78,6 +78,14 @@ AVAILABLE_SCOPES = {
     'spreadsheets_readonly': {
         'scope': 'https://www.googleapis.com/auth/spreadsheets.readonly',
         'description': 'Read-only access to Google Sheets'
+    },
+    'userinfo_email': {
+        'scope': 'https://www.googleapis.com/auth/userinfo.email',
+        'description': 'Access to user email address'
+    },
+    'userinfo_profile': {
+        'scope': 'https://www.googleapis.com/auth/userinfo.profile', 
+        'description': 'Access to user profile information'
     }
 }
 
@@ -88,7 +96,7 @@ except:
     tokenizer = tiktoken.get_encoding("cl100k_base")
 
 # FastAPI app
-app = FastAPI(title="MCP Chatbot API", version="2.0.0")
+app = FastAPI(title="MCP Chatbot API with Agno Agent", version="2.0.0")
 
 def generate_jwt(user: Dict[str, Any]) -> str:
     payload = {
@@ -191,8 +199,9 @@ async def startup_event():
 async def root():
     """Root endpoint with API information."""
     return {
-        "message": "MCP Chatbot API v2.0 - Scalable with Celery",
+        "message": "MCP Chatbot API v2.0 - Agno Agent with Celery",
         "version": "2.0.0",
+        "description": "FastAPI backend with Agno AI agent using MCP toolkit via Celery",
         "endpoints": {
             "auth": "/auth/scopes",
             "run": "/run",
@@ -343,7 +352,8 @@ async def oauth_callback(request: Request, db: AsyncSession = Depends(get_async_
         
         # Get user info from the token (if available)
         user_info = {}
-        if 'https://www.googleapis.com/auth/userinfo.email' in credentials.scopes:
+        # Always try to get user info if we have any Google scopes
+        if credentials.scopes:
             try:
                 # Get user info using the access token
                 user_info_response = requests.get(
@@ -485,7 +495,7 @@ async def run_task(
     user_id: str = Depends(get_user_id_from_token),
     db: AsyncSession = Depends(get_async_db)
 ):
-    """Queue a new MCP toolkit task."""
+    """Queue a new Agno agent task with MCP toolkit."""
     
     # Get user session from database
     result = await db.execute(
@@ -496,7 +506,7 @@ async def run_task(
     if not user_session or not user_session.authenticated:
         raise HTTPException(status_code=401, detail="User not authenticated. Please complete OAuth flow first.")
     
-    # Prepare environment variables for MCP toolkit
+    # Prepare environment variables for Agno agent and MCP toolkit
     token_data = user_session.token_data
     selected_scopes = user_session.selected_scopes
     selected_scope_urls = [AVAILABLE_SCOPES[s]['scope'] for s in selected_scopes if s in AVAILABLE_SCOPES]
@@ -532,7 +542,7 @@ async def run_task(
     await db.commit()
     await db.refresh(job_record)
     
-    # Queue the Celery task
+    # Queue the Celery task for Agno agent
     task = run_mcp_toolkit.delay(
         job_id=job_record.id,
         user_id=user_id,
@@ -543,7 +553,7 @@ async def run_task(
     return TaskResponse(
         job_id=job_record.id,
         status="queued",
-        message="Task has been queued for processing"
+        message="Agno agent task has been queued for processing"
     )
 
 @app.get("/result/{job_id}", response_model=JobResult)

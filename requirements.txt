@@ -31,6 +31,7 @@ tiktoken
 # MCP and Agent dependencies (preserve existing functionality)
 agno
 mcp
+asyncio-subprocess
 
 # Document processing (for mcp_toolkit)
 PyPDF2
